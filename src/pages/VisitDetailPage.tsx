@@ -14,6 +14,9 @@ const EVENT_META: Record<EventType, { label: string; tone?: 'brand' | 'gold' | '
   route_change: { label: '路线调整', tone: 'red' },
   wheelchair_loan: { label: '轮椅借出', tone: 'brand' },
   wheelchair_return: { label: '轮椅归还', tone: 'brand' },
+  wheelchair_coord: { label: '轮椅协调', tone: 'amber' },
+  wheelchair_transfer: { label: '跨馆调运', tone: 'gold' },
+  waiting_service: { label: '等候服务', tone: 'green' },
   escort_assign: { label: '陪同安排', tone: 'green' },
   parking: { label: '车位', tone: 'green' },
   assist: { label: '现场协助', tone: 'gold' },
@@ -110,6 +113,68 @@ export default function VisitDetailPage() {
           <Notice kind="info">现场情况（电梯、闭馆、拥挤、排班）较预约时发生变化，当前展示的路线已由调度台按最新情况重新核算。</Notice>
         )}
       </div>
+
+      {/* —— 轮椅库存协调进度（观众端可见） —— */}
+      {visit.party.borrowWheelchair && (visit.route?.wheelchairInfo || visit.branchTransfer || visit.waitingServices.length > 0 || visit.wheelchairCoord) && (
+        <div className="card">
+          <h2>♿ 轮椅借用协调进度</h2>
+          {(() => {
+            const info = visit.route?.wheelchairInfo
+            const tr = visit.branchTransfer
+            const hasLoan = visit.loans.some((l) => l.loanedAt && !l.returnedAt)
+            const resolutionLabel: Record<string, string> = {
+              bring_own: '您已与服务台确认自带轮椅/助行设备，馆方预留已释放',
+              reschedule: `已协商调整到馆时间为 ${fmtMin(visit.baseArrivalMin)}，我们按新时段预留设备与接应`,
+              priority_loan: '已为您登记优先借用，轮椅回库/调入后将第一时间通知您',
+              branch_transfer: '已为您从其他馆区调运轮椅',
+              pending: '服务台正在为您协调轮椅'
+            }
+            return (
+              <>
+                {info && !hasLoan && info.waitMin === 0 && visit.wheelchairCoord?.resolution !== 'bring_own' && (
+                  <Notice kind="ok">到馆后即可在服务台领取轮椅（当前可发 {info.availableAtArrival} 台），无需等待。</Notice>
+                )}
+                {info && !hasLoan && info.waitMin > 0 && visit.wheelchairCoord?.resolution !== 'bring_own' && (!tr || tr.status === 'cancelled') && (
+                  <Notice kind="warn">
+                    您到馆时段借用轮椅的观众较多：排队第 {info.queueIndex} 位，预计等待约 {info.waitMin} 分钟（{fmtMin(info.nearestReadyMin!)} 左右可领）。
+                    {info.returnEtas.length > 0 && (
+                      <> 前方 {info.returnEtas.map((r) => `${r.assetCode} 预计 ${fmtMin(r.returnMin)} 归还`).join('；')}。</>
+                    )}
+                    服务台会主动与您联系协调，您也可先在等候区休息。
+                  </Notice>
+                )}
+                {visit.wheelchairCoord && resolutionLabel[visit.wheelchairCoord.resolution] && (
+                  <Notice kind={visit.wheelchairCoord.resolution === 'bring_own' ? 'ok' : 'info'}>
+                    {resolutionLabel[visit.wheelchairCoord.resolution]}
+                    {visit.wheelchairCoord.resolution !== 'branch_transfer' && <>（工作人员记录：{visit.wheelchairCoord.reason}）</>}
+                  </Notice>
+                )}
+                {tr && tr.status !== 'cancelled' && (
+                  <div className="wc-transfer">
+                    <div className="flex between wrap">
+                      <b>🚐 {tr.fromBranch} 轮椅 {tr.assetCode} 调运进度</b>
+                      <Badge tone={tr.status === 'arrived' ? 'green' : tr.status === 'in_transit' ? 'amber' : 'blue'}>
+                        {tr.status === 'requested' ? '已请求待取货' : tr.status === 'in_transit' ? '运送途中' : '已送达服务台'}
+                      </Badge>
+                    </div>
+                    <div className="wc-transfer-grid">
+                      <div><span>搬运人员</span><b>{tr.carrier}（{tr.carrierPhone}）</b></div>
+                      <div><span>预计到达</span><b>{fmtMin(tr.etaMin)}{tr.arriveMin != null ? ` · ${fmtMin(tr.arriveMin)} 已到` : ''}</b></div>
+                      <div><span>您的等待位置</span><b>{tr.waitLocation ?? '一层服务台等候区'}</b></div>
+                    </div>
+                  </div>
+                )}
+                {visit.waitingServices.length > 0 && (
+                  <div className="small muted" style={{ marginTop: 10 }}>
+                    ☕ 等待期间服务台已为您提供 {visit.waitingServices.length} 次照料：
+                    {visit.waitingServices.map((w) => ` ${({ seat: '座椅', water: '饮水', guide: '临时讲解' } as const)[w.kind]}${w.note ? `(${w.note})` : ''}`).join('、')}（均已计入您的预约记录）。
+                  </div>
+                )}
+              </>
+            )
+          })()}
+        </div>
+      )}
 
       {visit.status === 'booked' && (
         <div className="card">

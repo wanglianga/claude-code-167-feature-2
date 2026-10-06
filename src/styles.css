@@ -295,3 +295,55 @@ textarea { min-height: 74px; resize: vertical; }
   .hero { padding: 20px 18px; }
   .hero h1 { font-size: 1.25rem; }
 }
+
+.green-text { color: var(--green) !important; }
+.btn.green { background: var(--green); border-color: var(--green); color: #fff; }
+.btn.green:hover { background: #226034; }
+.btn.blue { background: var(--blue); border-color: var(--blue); color: #fff; }
+.btn.blue:hover { background: #1f4a6e; }
+
+/* —— 轮椅库存不足协调台 —— */
+.wc-desk { border-left: 4px solid var(--gold); }
+.wc-list { display: flex; flex-direction: column; gap: 12px; margin-top: 12px; }
+.wc-card {
+  border: 1px solid var(--line); border-radius: 12px; padding: 12px 14px;
+  background: var(--surface);
+}
+.wc-card.shortage { border-color: #e3b7af; background: linear-gradient(180deg, #fff9f8, var(--surface)); }
+.wc-stat-row { display: grid; grid-template-columns: repeat(4, 1fr); gap: 8px; margin: 10px 0 6px; }
+.wc-stat {
+  background: var(--surface-2); border: 1px solid var(--line); border-radius: 10px;
+  padding: 8px 10px; text-align: center;
+}
+.wc-stat b { display: block; font-size: 1.12rem; color: var(--brand-dark); white-space: nowrap; }
+.wc-stat span { font-size: 0.72rem; color: var(--ink-2); }
+@media (max-width: 760px) { .wc-stat-row { grid-template-columns: repeat(2, 1fr); } }
+
+.wc-reason { margin: 4px 0 2px; }
+.wc-returns { margin-top: 8px; display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
+.return-chip {
+  font-size: 0.78rem; background: var(--gold-soft); border: 1px solid #ecd9b2;
+  color: #7a5513; border-radius: 999px; padding: 3px 10px;
+}
+.wc-transfer {
+  margin-top: 10px; border: 1px solid #e7d3a6; background: var(--gold-soft);
+  border-radius: 10px; padding: 10px 12px;
+}
+.wc-transfer-grid {
+  display: grid; grid-template-columns: repeat(2, 1fr); gap: 6px 16px; margin-top: 8px;
+  font-size: 0.85rem;
+}
+.wc-transfer-grid > div { display: flex; flex-direction: column; }
+.wc-transfer-grid span { font-size: 0.74rem; color: var(--ink-2); }
+@media (max-width: 560px) { .wc-transfer-grid { grid-template-columns: 1fr; } }
+
+.wc-branches { margin-top: 10px; }
+.branch-list { display: flex; flex-direction: column; gap: 6px; margin-top: 6px; }
+.branch-item {
+  display: flex; justify-content: space-between; align-items: center; gap: 10px;
+  border: 1px dashed var(--line); border-radius: 10px; padding: 7px 10px;
+  background: var(--surface-2); flex-wrap: wrap;
+}
+.wc-wait-services, .wc-actions {
+  margin-top: 10px; padding-top: 10px; border-top: 1px dashed var(--line);
+}

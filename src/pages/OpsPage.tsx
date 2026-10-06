@@ -5,6 +5,7 @@ import { STAFF, HALLS, ELEVATORS, TOTAL_WHEELCHAIRS, TOTAL_PARKING } from '../da
 import { crowdLabel, parkingAvailable, wheelchairAvailable } from '../lib/planner'
 import type { LiveSignals } from '../lib/planner'
 import MuseumMap from '../components/MuseumMap'
+import WheelchairDesk from '../components/WheelchairDesk'
 import { Badge, Notice, StatusBadge } from '../components/ui'
 import { fmtMin, prettyDate, todayISO, weekdayCN } from '../utils'
 
@@ -144,6 +145,9 @@ export default function OpsPage() {
         </div>
       </div>
 
+      {/* —— 轮椅库存不足协调台 —— */}
+      <WheelchairDesk />
+
       {/* —— 接应任务看板 —— */}
       <div className="card">
         <h2>📋 今日接应任务看板 <span className="small muted">（展厅工作人员）</span></h2>
@@ -225,11 +229,15 @@ export default function OpsPage() {
                   {visit.status === 'completed' && <button className="btn ghost sm" onClick={() => s.setStatus(visit.id, 'visiting')}>撤销归档</button>}
                 </div>
                 <div className="flex mt8" style={{ gap: 8 }}>
-                  {visit.party.borrowWheelchair && visit.loans.filter((l) => l.loanedAt && !l.returnedAt).length === 0 && (
-                    <button className="btn gold sm" disabled={wAvail <= 0} onClick={() => s.loanWheelchair(visit.id)}>
-                      {wAvail <= 0 ? '预约借用：库存不足，已排队调剂' : '♿ 按预约借出轮椅'}
-                    </button>
-                  )}
+                  {visit.party.borrowWheelchair && visit.loans.filter((l) => l.loanedAt && !l.returnedAt).length === 0 && (() => {
+                    const inboundArrived = visit.branchTransfer?.status === 'arrived'
+                    const disabled = wAvail <= 0 && !inboundArrived
+                    return (
+                      <button className="btn gold sm" disabled={disabled} onClick={() => s.loanWheelchair(visit.id)}>
+                        {inboundArrived ? `♿ 发放跨馆调入轮椅 ${visit.branchTransfer!.assetCode}` : disabled ? '预约借用：库存不足，可在协调台安排优先/跨馆调入' : '♿ 按预约借出轮椅'}
+                      </button>
+                    )
+                  })()}
                   {!visit.party.borrowWheelchair && visit.loans.filter((l) => l.loanedAt && !l.returnedAt).length === 0 && (
                     <button className="btn gold sm" disabled={wAvail <= 0} onClick={() => s.loanWheelchair(visit.id)}>
                       {wAvail <= 0 ? '现场借用：库存不足' : '♿ 现场应急借出轮椅（如不适/疲劳）'}

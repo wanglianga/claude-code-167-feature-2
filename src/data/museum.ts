@@ -98,6 +98,29 @@ export const TOTAL_WHEELCHAIRS = 12
 // 无障碍车位
 export const TOTAL_PARKING = 8
 
+// —— 其他馆区轮椅可调拨资源（同城馆际互助）——
+export interface BranchStockInfo {
+  branch: string
+  total: number
+  distanceKm: number
+  transferMin: number
+  carrier: string
+  carrierPhone: string
+}
+
+export const BRANCH_WHEELCHAIRS: BranchStockInfo[] = [
+  { branch: '东馆区（城市分馆）', total: 8, distanceKm: 3.2, transferMin: 25, carrier: '郑师傅', carrierPhone: '135-0011-2201' },
+  { branch: '西馆区（历史馆区）', total: 6, distanceKm: 5.5, transferMin: 35, carrier: '冯师傅', carrierPhone: '135-0011-2202' },
+  { branch: '南馆区（自然馆区）', total: 4, distanceKm: 7.8, transferMin: 45, carrier: '何师傅', carrierPhone: '135-0011-2203' }
+]
+
+// 跨馆调入轮椅的资产编号前缀（按馆区稳定生成）
+export const BRANCH_ASSET_PREFIX: Record<string, string> = {
+  '东馆区（城市分馆）': 'WC-E',
+  '西馆区（历史馆区）': 'WC-W',
+  '南馆区（自然馆区）': 'WC-S'
+}
+
 // 讲解员 / 志愿者排班
 export const STAFF: Staff[] = [
   {
@@ -109,6 +132,11 @@ export const STAFF: Staff[] = [
     id: 's2', name: '王建国', role: '讲解员',
     skills: ['slow', 'wheelchair'], onLeave: [],
     shiftStartMin: 9 * 60, shiftEndMin: 17 * 60
+  },
+  {
+    id: 's4', name: '唐文静', role: '讲解员',
+    skills: ['slow', 'wheelchair'], onLeave: [],
+    shiftStartMin: 8 * 60 + 30, shiftEndMin: 16 * 60 + 30
   },
   {
     id: 's3', name: '赵晓', role: '讲解员',

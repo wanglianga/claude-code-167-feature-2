@@ -45,6 +45,15 @@ const ops = renderAt('/ops')
 assert(ops.includes('馆内工作台'), '平板工作台渲染')
 assert(ops.includes('今日接应任务看板'), '展厅工作人员看到接应看板与预计到达时间')
 assert(ops.includes('现场态势与安全调度'), '含电梯/闭馆/拥挤/排班/库存调度')
+assert(ops.includes('轮椅库存不足协调台'), '含轮椅库存不足协调台')
+assert(ops.includes('观众到馆'), '协调台展示观众到馆时间')
+assert(ops.includes('归还预计'), '展示前方轮椅归还预计时间')
+assert(ops.includes('可调用其他馆区设备'), '展示是否可调用其他馆区设备')
+assert(ops.includes('搬运人员'), '跨馆调运展示搬运人员')
+assert(ops.includes('观众等待位置'), '跨馆调运展示当前观众等待位置')
+assert(ops.includes('提供座椅') && ops.includes('提供饮水') && ops.includes('临时讲解'), '等待期间可提供座椅/饮水/临时讲解并计入记录')
+assert(ops.includes('联系观众自带设备') && ops.includes('调整参观时段') && ops.includes('安排优先借用'), '库存不足时三种协调处置均可见')
+assert(ops.includes('郑师傅'), '演示数据中的跨馆调运展示搬运人员姓名')
 
 const someId = useStore.getState().visits[0].id
 const detail = renderAt(`/visit/${someId}`)
@@ -65,5 +74,21 @@ const id = useStore.getState().createVisit({
 const full = renderAt(`/visit/${id}`)
 assert(full.includes('手语'), '全需求详情含手语')
 assert(full.includes('馆区无障碍平面图'), '详情含馆区平面图')
+
+// 轮椅协调进度（观众端）：跨馆调运中的钱奶奶
+const qian = useStore.getState().visits.find((v) => v.party.contactName === '钱奶奶')
+assert(!!qian, '演示数据含跨馆调运中的钱奶奶')
+const qianPage = renderAt(`/visit/${qian.id}`)
+assert(qianPage.includes('轮椅借用协调进度'), '观众端展示轮椅协调进度卡片')
+assert(qianPage.includes('跨馆') && qianPage.includes('郑师傅'), '展示跨馆调运与搬运人员')
+assert(qianPage.includes('等待位置'), '展示观众等待位置')
+assert(qianPage.includes('临时讲解'), '等待期间临时讲解服务对观众可见')
+assert(qianPage.includes('轮椅协调') || qianPage.includes('跨馆调运'), '服务记录含轮椅协调/跨馆调运标签')
+
+// 排队待协调的赵大伯：显示排队位次与等待分钟
+const zhao = useStore.getState().visits.find((v) => v.party.contactName === '赵大伯')
+const zhaoPage = renderAt(`/visit/${zhao.id}`)
+assert(zhaoPage.includes('排队第'), '排队观众页展示排队位次')
+assert(zhaoPage.includes('归还'), '展示前方设备归还预计')
 console.log(`\n结果：${pass} 通过，${fail} 失败`)
 if (fail) process.exit(1)

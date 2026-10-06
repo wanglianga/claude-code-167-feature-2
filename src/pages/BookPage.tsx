@@ -131,9 +131,14 @@ export default function BookPage() {
           </div>
 
           <div className="badges">
-            {party.borrowWheelchair && (preview.wheelchairIssue
-              ? <Badge tone="red">♿ {preview.wheelchairIssue.slice(0, 12)}…</Badge>
+            {party.borrowWheelchair && (preview.wheelchairInfo
+              ? (preview.wheelchairInfo.waitMin > 0
+                ? <Badge tone="red">♿ 排队第 {preview.wheelchairInfo.queueIndex} 位 · 等约 {preview.wheelchairInfo.waitMin} 分钟</Badge>
+                : <Badge tone="green">♿ 到馆可发 {preview.wheelchairInfo.availableAtArrival} 台</Badge>)
               : <Badge tone="green">♿ 轮椅可保障</Badge>)}
+            {party.borrowWheelchair && preview.wheelchairInfo && preview.wheelchairInfo.waitMin > 15 && (
+              <Badge tone="amber">🏛 {preview.wheelchairInfo.branches.filter((b) => b.available > 0).length} 个馆区可调设备</Badge>
+            )}
             {party.needParking && (preview.parkingIssue
               ? <Badge tone="amber">🅿️ 车位需协调</Badge>
               : <Badge tone="green">🅿️ 车位 {preview.parkingSlot}</Badge>)}

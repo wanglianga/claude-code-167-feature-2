@@ -67,6 +67,9 @@ export type EventType =
   | 'route_change'
   | 'wheelchair_loan'
   | 'wheelchair_return'
+  | 'wheelchair_coord'
+  | 'wheelchair_transfer'
+  | 'waiting_service'
   | 'escort_assign'
   | 'parking'
   | 'assist'
@@ -116,6 +119,37 @@ export interface SkippedHall {
   reason: string
 }
 
+/** 排队等待本馆轮椅时，前序设备的预计归还信息 */
+export interface WheelchairReturnEta {
+  assetCode: string
+  returnMin: number // 预计归还（当日分钟数）
+  holder: string // 当前借用人（预约编号/称呼）
+  waitMin: number // 相对观众到馆需等待的分钟数
+}
+
+/** 其他馆区可调用轮椅的信息 */
+export interface BranchStock {
+  branch: string
+  available: number
+  distanceKm: number
+  transferMin: number // 搬运预计耗时（分钟）
+  carrier: string // 默认搬运人员
+  carrierPhone: string
+}
+
+/** 轮椅库存协调快照（随路线重算刷新） */
+export interface WheelchairPlanInfo {
+  total: number // 本馆轮椅总数
+  availableAtArrival: number // 观众到馆时刻可立即发放的台数
+  demandAtArrival: number // 到馆时段同时需要借用的预约组数（含自己）
+  queueIndex: number // 排队位次（1 起；0 表示到馆即可领取）
+  returnEtas: WheelchairReturnEta[] // 排队时前序设备的归还预计
+  nearestReadyMin?: number // 最早可领取的时刻（当日分钟数）
+  waitMin: number // 预计等待分钟数
+  branches: BranchStock[] // 其他馆区可调设备
+  branchNeeded: number // 本馆无法满足、需跨馆调入的台数（仅本预约视角：0/1）
+}
+
 export interface RoutePlan {
   version: number
   generatedAt: string
@@ -139,6 +173,7 @@ export interface RoutePlan {
   parkingIssue?: string
   wheelchairNeeded?: boolean
   wheelchairIssue?: string
+  wheelchairInfo?: WheelchairPlanInfo
   signals?: string // 生成路线时的现场信号快照，用于提示"情况已变化需重新规划"
   reduced?: boolean // 因身体不适等缩减
 }
@@ -148,6 +183,50 @@ export interface Loan {
   assetCode: string
   loanedAt?: string
   returnedAt?: string
+  branch?: string // 来源馆区（跨馆调入时记录调出馆区）
+}
+
+// —— 轮椅库存不足协调 ——
+
+/** 库存不足时工作人员与观众沟通后的处置方式 */
+export type WheelchairResolution =
+  | 'bring_own' // 联系观众自带设备
+  | 'reschedule' // 调整参观时段
+  | 'priority_loan' // 安排优先借用（排队优先 / 跨馆调入后优先领取）
+  | 'branch_transfer' // 调用其他馆区轮椅
+  | 'pending' // 尚未协调
+
+/** 跨馆调运状态 */
+export type TransferStatus = 'requested' | 'in_transit' | 'arrived' | 'cancelled'
+
+export interface BranchTransfer {
+  id: string
+  fromBranch: string
+  assetCode: string
+  carrier: string // 搬运人员
+  carrierPhone: string
+  requestMin: number // 发起调运的当日分钟数
+  etaMin: number // 预计到达本馆服务台的当日分钟数
+  arriveMin?: number // 实际到达
+  status: TransferStatus
+  waitLocation?: string // 观众当前等待位置
+}
+
+/** 等待轮椅期间服务台提供的临时服务 */
+export interface WaitingService {
+  id: string
+  kind: 'seat' | 'water' | 'guide'
+  note?: string
+  at: string // ISO
+}
+
+/** 一次库存不足协调的留痕（原因等） */
+export interface WheelchairCoord {
+  resolution: WheelchairResolution
+  reason: string
+  at: string // ISO
+  actor: string
+  rescheduleToMin?: number // 调整后的到馆分钟数
 }
 
 export interface Visit {
@@ -162,6 +241,9 @@ export interface Visit {
   escortId?: string
   events: ServiceEvent[]
   feedback?: string
+  wheelchairCoord?: WheelchairCoord
+  branchTransfer?: BranchTransfer
+  waitingServices: WaitingService[]
   createdAt: string
 }
 

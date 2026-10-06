@@ -1,5 +1,5 @@
 import { STAFF } from '../src/data/museum'
-import { planRoute, DEFAULT_SIGNALS, type LiveSignals } from '../src/lib/planner'
+import { planRoute, wheelchairCoordInfo, DEFAULT_SIGNALS, type LiveSignals } from '../src/lib/planner'
 import type { PartyProfile, Visit } from '../src/types'
 import { uid, shortCode } from '../src/utils'
 
@@ -73,15 +73,91 @@ console.log('\n场景 4：两部电梯全部故障 → 不崩溃，跨层展厅�
   assert(plan.skipped.length === 6, `6 个展厅全部给出跳过原因`)
 }
 
-console.log('\n场景 5：轮椅库存不足（12 台被占用）')
+console.log('\n场景 5：多预约同时需要轮椅 → 库存不足、排队位次、归还预计、跨馆可调')
 {
-  const others: Visit[] = Array.from({ length: 12 }, () => {
-    const v = makeVisit(DATE, 10 * 60, party({ borrowWheelchair: true }))
-    return v
-  })
+  const at = 10 * 60
+  // 12 组在 self 到馆前 15 分钟内错峰到馆并领完全部 12 台（仍属同一参观时段 ±30 分钟）
+  const others: Visit[] = Array.from({ length: 12 }, (_, i) => makeVisit(DATE, at - 15 + (i % 3) * 5, party({ borrowWheelchair: true })))
   const p = party({ borrowWheelchair: true })
-  const plan = planRoute({ party: p, date: DATE, arrivalMin: 14 * 60, signals: DEFAULT_SIGNALS, visits: others, staff: STAFF })
+  const plan = planRoute({ party: p, date: DATE, arrivalMin: at, signals: DEFAULT_SIGNALS, visits: others, staff: STAFF })
+  const info = plan.wheelchairInfo!
   assert(!!plan.wheelchairIssue, `库存不足提示：${plan.wheelchairIssue?.slice(0, 24)}…`)
+  assert(info.availableAtArrival === 0, `到馆时可立即发放 0 台（实际 ${info.availableAtArrival}）`)
+  assert(info.queueIndex >= 1, `当前预约排队第 ${info.queueIndex} 位（期望 ≥1）`)
+  assert(info.waitMin > 0 && info.nearestReadyMin != null && info.nearestReadyMin > at, `预计等待 ${info.waitMin} 分钟，${info.nearestReadyMin} 可领`)
+  assert(info.demandAtArrival >= 10, `同段（±30 分钟）${info.demandAtArrival} 组同时借用（期望 ≥10）`)
+  assert(info.returnEtas.length >= 1, `给出 ${info.returnEtas.length} 条前方设备归还预计`)
+  assert(info.returnEtas.every((r) => r.returnMin > at && r.waitMin > 0), '归还预计均晚于到馆时间')
+  assert(info.branches.length === 3 && info.branches.every((b) => b.carrier && b.transferMin > 0), '列出 3 个其他馆区的可调设备、搬运耗时与搬运人员')
+  assert(info.branchNeeded === 1, '等待较久时提示可调用其他馆区设备')
+}
+
+console.log('\n场景 5b：库存充足 → 到馆即可领取，无需排队')
+{
+  const others: Visit[] = Array.from({ length: 3 }, () => makeVisit(DATE, 10 * 60, party({ borrowWheelchair: true })))
+  const plan = planRoute({ party: party({ borrowWheelchair: true }), date: DATE, arrivalMin: 10 * 60, signals: DEFAULT_SIGNALS, visits: others, staff: STAFF })
+  const info = plan.wheelchairInfo!
+  assert(info.waitMin === 0 && info.queueIndex === 0, `无需排队（等待 ${info.waitMin} 分、位次 ${info.queueIndex}）`)
+  assert(info.availableAtArrival >= 8, `到馆可发 ${info.availableAtArrival} 台（期望 ≥8）`)
+  assert(!plan.wheelchairIssue, '库存充足时无库存告警')
+}
+
+console.log('\n场景 5c：他组轮椅 10:30 前归还 → 11:00 到馆者可立即领取')
+{
+  const others: Visit[] = Array.from({ length: 10 }, () => makeVisit(DATE, 9 * 60, party({ borrowWheelchair: true })))
+  const plan = planRoute({ party: party({ borrowWheelchair: true }), date: DATE, arrivalMin: 11 * 60, signals: DEFAULT_SIGNALS, visits: others, staff: STAFF })
+  assert(plan.wheelchairInfo!.waitMin === 0, `晚到组承接归还设备，等待 ${plan.wheelchairInfo!.waitMin} 分钟`)
+}
+
+console.log('\n场景 5d：轮椅全部报修/消毒 → 给出抢修等待而非崩溃')
+{
+  const sig: LiveSignals = { ...DEFAULT_SIGNALS, wheelchairOffset: 12 }
+  const plan = planRoute({ party: party({ borrowWheelchair: true }), date: DATE, arrivalMin: 10 * 60, signals: sig, visits: [], staff: STAFF })
+  const info = plan.wheelchairInfo!
+  assert(!!plan.wheelchairIssue, '无可用设备时给出库存不足协调提示')
+  assert(info.waitMin >= 60, `抢修周转等待约 ${info.waitMin} 分钟（期望 ≥60）`)
+  assert(info.returnEtas.length === 0, '无在借设备时归还预计为空')
+}
+
+console.log('\n场景 5e：协调为自带设备后释放本馆预留，他组排队位次前移')
+{
+  const at = 10 * 60
+  const bringOwn = makeVisit(DATE, at, party({ borrowWheelchair: true, contactName: '自带者' }))
+  bringOwn.wheelchairCoord = { resolution: 'bring_own', reason: '电话确认自带', at: new Date().toISOString(), actor: '服务台' }
+  const others: Visit[] = [bringOwn, ...Array.from({ length: 11 }, () => makeVisit(DATE, at, party({ borrowWheelchair: true })))]
+  const info = wheelchairCoordInfo({ date: DATE, visits: others, signals: DEFAULT_SIGNALS, selfWants: true, selfArrivalMin: at })
+  assert(info.demandAtArrival === 12, `同段需求 ${info.demandAtArrival} 组（自带者仍计入并发需求展示）`)
+  // 12 台池、11 个本馆需求 → self 视角可满足
+  assert(info.waitMin === 0, `自带者不占本馆名额，第 12 组到馆可领（等待 ${info.waitMin} 分）`)
+}
+
+console.log('\n场景 5f：跨馆调入满足者不占本馆池，本馆排队不受其影响')
+{
+  const at = 10 * 60
+  const transferred = makeVisit(DATE, at, party({ borrowWheelchair: true, contactName: '调入者' }))
+  transferred.wheelchairCoord = { resolution: 'branch_transfer', reason: '跨馆调入', at: new Date().toISOString(), actor: '服务台' }
+  const others: Visit[] = [transferred, ...Array.from({ length: 11 }, () => makeVisit(DATE, at, party({ borrowWheelchair: true })))]
+  const plan = planRoute({ party: party({ borrowWheelchair: true }), date: DATE, arrivalMin: at, signals: DEFAULT_SIGNALS, visits: others, staff: STAFF })
+  assert(plan.wheelchairInfo!.waitMin === 0, `11 个本馆需求 + 1 个跨馆调入：本馆池仍够（等待 ${plan.wheelchairInfo!.waitMin} 分）`)
+  assert(!plan.wheelchairIssue, '本馆池未被跨馆调入者占用，无库存告警')
+  assert(plan.notices.some((n) => n.includes('同段')), '提示同段借用组数与设备安排')
+}
+
+console.log('\n场景 5g：标记"优先借用"的预约在椅子释放时先于同刻普通预约领取')
+{
+  const at = 10 * 60
+  // 9:00 起错峰的 12 组占满全部椅子（10:30 后陆续归还）
+  const holders = Array.from({ length: 12 }, (_, i) => makeVisit(DATE, 9 * 60 + i * 2, party({ borrowWheelchair: true })))
+  const normal = makeVisit(DATE, at, party({ borrowWheelchair: true, contactName: '普通排队' }))
+  const vip = makeVisit(DATE, at, party({ borrowWheelchair: true, contactName: '优先借用' }))
+  vip.wheelchairCoord = { resolution: 'priority_loan', reason: '老人不宜久站，电话沟通后优先', at: new Date().toISOString(), actor: '服务台' }
+  const all = [...holders, normal, vip]
+  const planVip = planRoute({ party: vip.party, date: DATE, arrivalMin: at, signals: DEFAULT_SIGNALS, visits: all, staff: STAFF, selfId: vip.id })
+  const planNormal = planRoute({ party: normal.party, date: DATE, arrivalMin: at, signals: DEFAULT_SIGNALS, visits: all, staff: STAFF, selfId: normal.id })
+  assert(planVip.wheelchairInfo!.waitMin < planNormal.wheelchairInfo!.waitMin,
+    `优先组等待 ${planVip.wheelchairInfo!.waitMin} 分 < 普通组 ${planNormal.wheelchairInfo!.waitMin} 分`)
+  assert(planVip.wheelchairInfo!.queueIndex < planNormal.wheelchairInfo!.queueIndex,
+    `优先组位次 ${planVip.wheelchairInfo!.queueIndex} 早于普通组 ${planNormal.wheelchairInfo!.queueIndex}`)
 }
 
 console.log('\n场景 6：迟到 40 分钟 → 接应时间顺延并重查拥挤')

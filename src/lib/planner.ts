@@ -1,6 +1,6 @@
-import { EDGES, ELEVATORS, HALLS, HALL_FLOOR_STAFF_CAPACITY, HOURS, NODES, TOTAL_PARKING, TOTAL_WHEELCHAIRS } from '../data/museum'
+import { BRANCH_WHEELCHAIRS, EDGES, ELEVATORS, HALLS, HALL_FLOOR_STAFF_CAPACITY, HOURS, NODES, TOTAL_PARKING, TOTAL_WHEELCHAIRS } from '../data/museum'
 import type {
-  Edge, Floor, GraphNode, HallInfo, HallStop, PartyProfile, RoutePlan, RouteSeg, Staff, Visit
+  BranchStock, Edge, Floor, GraphNode, HallInfo, HallStop, PartyProfile, RoutePlan, RouteSeg, Staff, Visit, WheelchairPlanInfo, WheelchairReturnEta
 } from '../types'
 import { fmtMin, uid } from '../utils'
 
@@ -253,15 +253,223 @@ function returnReserve(ctx: PlanCtx, fromHall: string): number {
 }
 
 // —— 设备 / 车位可用性 ——
+// 保守的全天静态口径（角标/预约页用）；精确的到馆时刻排队与归还预计见 wheelchairCoordInfo
 export function wheelchairAvailable(signals: LiveSignals, visits: Visit[], date: string, selfId?: string): number {
   const reserved = visits.filter(
     (v) => v.id !== selfId && v.date === date && v.status !== 'cancelled' && v.party.borrowWheelchair
+      && v.wheelchairCoord?.resolution !== 'bring_own'
+      && v.wheelchairCoord?.resolution !== 'branch_transfer'
   ).length
   const loaned = visits
     .filter((v) => v.id !== selfId && v.date === date && v.status !== 'cancelled')
     .reduce((n, v) => n + v.loans.filter((l) => l.loanedAt && !l.returnedAt).length, 0)
+  // 预留者本身包含已借出者，静态口径取两者较大值，避免重复扣减
   return Math.max(0, TOTAL_WHEELCHAIRS - signals.wheelchairOffset - Math.max(reserved, loaned))
 }
+
+// 归还后消毒、脚踏/刹车调试的周转时间
+const CHAIR_TURN_MIN = 2
+
+interface ChairRow {
+  visitId: string
+  label: string
+  arrival: number
+  end: number
+  hasChair: boolean // 已手持轮椅（含已到达的跨馆调入）
+  external: boolean // 由跨馆调入满足，不占本馆池
+  priority: boolean
+  assetCode?: string
+}
+
+/** 当日轮椅需求行：预约借用（未改为自带）+ 现场已借出（含应急借用） */
+function chairRows(visits: Visit[], date: string, lateOf: Record<string, number>): ChairRow[] {
+  const rows: ChairRow[] = []
+  for (const v of visits) {
+    if (v.date !== date || v.status === 'cancelled') continue
+    const openLoan = v.loans.find((l) => l.loanedAt && !l.returnedAt)
+    const coord = v.wheelchairCoord
+    const bringOwn = coord?.resolution === 'bring_own'
+    const external = coord?.resolution === 'branch_transfer'
+    const wants = v.party.borrowWheelchair && !bringOwn
+    if (!wants && !openLoan) continue
+    let arrival = v.baseArrivalMin + (lateOf[v.id] ?? 0)
+    if (coord?.resolution === 'reschedule' && coord.rescheduleToMin != null) arrival = coord.rescheduleToMin
+    const end = v.route ? Math.max(v.route.endMin, arrival + 30) : arrival + 90
+    rows.push({
+      visitId: v.id,
+      label: `${v.party.contactName || '观众'}（${v.code}）`,
+      arrival,
+      end,
+      hasChair: !!openLoan,
+      external: external && !openLoan,
+      priority: coord?.resolution === 'priority_loan',
+      assetCode: openLoan?.assetCode
+    })
+  }
+  return rows
+}
+
+/**
+ * 轮椅库存协调模拟（按到馆时间轴分配，而非全天静态预留）：
+ * 到馆即领 / 排队位次 / 前序归还预计 / 最早可领时间 / 其他馆区可调资源。
+ * 被标记"优先借用"的预约在椅子释放时优先获得。
+ */
+export function wheelchairCoordInfo(opts: {
+  date: string
+  visits: Visit[]
+  signals: LiveSignals
+  selfId?: string
+  selfWants: boolean
+  selfArrivalMin: number
+  selfContact?: string
+  selfCode?: string
+  lateOf?: Record<string, number>
+}): WheelchairPlanInfo {
+  const { date, visits, signals } = opts
+  const lateOf = opts.lateOf ?? {}
+  const rows = chairRows(visits.filter((v) => v.id !== opts.selfId), date, lateOf)
+
+  // 合成"当前预约"行（预约页预览时尚未入库；已入库的 self 已被排除，统一在此加入）
+  if (opts.selfWants) {
+    const selfInStore = opts.selfId ? visits.find((v) => v.id === opts.selfId) : undefined
+    const coord = selfInStore?.wheelchairCoord
+    const openLoan = selfInStore?.loans.find((l) => l.loanedAt && !l.returnedAt)
+    rows.push({
+      visitId: opts.selfId ?? '__preview__',
+      label: `${opts.selfContact ?? '当前预约'}（${opts.selfCode ?? '预览'}）`,
+      arrival: opts.selfArrivalMin,
+      end: selfInStore?.route ? Math.max(selfInStore.route.endMin, opts.selfArrivalMin + 30) : opts.selfArrivalMin + 90,
+      hasChair: !!openLoan,
+      external: coord?.resolution === 'branch_transfer' && !openLoan,
+      priority: coord?.resolution === 'priority_loan',
+      assetCode: openLoan?.assetCode
+    })
+  }
+
+  const selfId = opts.selfId ?? (opts.selfWants ? '__preview__' : undefined)
+  const inHouse = rows.filter((r) => !r.external)
+  const holders = inHouse.filter((r) => r.hasChair)
+  let pool = Math.max(0, TOTAL_WHEELCHAIRS - signals.wheelchairOffset - holders.length)
+
+  const arrivals = inHouse
+    .filter((r) => !r.hasChair)
+    .sort((a, b) => a.arrival - b.arrival)
+
+  // —— 事件轴模拟：到达入队 → 椅子回池 → 按"优先标记、到达先后"分配 ——
+  const readyAt = new Map<string, number>()
+  const releaseAt = new Map<string, number>()
+  for (const h of holders) { readyAt.set(h.visitId, h.arrival); releaseAt.set(h.visitId, h.end + CHAIR_TURN_MIN) }
+
+  const orderKey = (r: ChairRow) => Number(r.priority) * 1e6 - r.arrival // 大者优先
+  let ai = 0
+  const waiting: ChairRow[] = []
+  const heap: Array<{ at: number; row: ChairRow }> = []
+  const REPAIR_MIN = 60 // 池内轮椅全部报修/消毒中的抢修周转估算
+
+  while (ai < arrivals.length || waiting.length > 0) {
+    const tArr = arrivals[ai]?.arrival
+    const tRel = heap[0]?.at
+    const t = tArr != null && (tRel == null || tArr <= tRel) ? tArr : tRel!
+
+    while (ai < arrivals.length && arrivals[ai].arrival <= t) waiting.push(arrivals[ai++])
+    heap.sort((a, b) => a.at - b.at)
+    while (heap[0] && heap[0].at <= t) { pool += 1; heap.shift() }
+
+    if (pool === 0 && heap.length === 0) {
+      // 无在借设备可等：全部椅子被报修/消毒占用，按抢修周转依次发放
+      waiting.sort((a, b) => orderKey(b) - orderKey(a) || a.label.localeCompare(b.label))
+      for (const r of waiting) {
+        const ready = t + REPAIR_MIN
+        readyAt.set(r.visitId, ready)
+        releaseAt.set(r.visitId, ready + (r.end - r.arrival) + CHAIR_TURN_MIN)
+      }
+      waiting.length = 0
+      continue
+    }
+
+    while (pool > 0 && waiting.length > 0) {
+      waiting.sort((a, b) => orderKey(b) - orderKey(a) || a.label.localeCompare(b.label))
+      const r = waiting.shift()!
+      pool -= 1
+      readyAt.set(r.visitId, t)
+      releaseAt.set(r.visitId, t + (r.end - r.arrival) + CHAIR_TURN_MIN)
+      heap.push({ at: releaseAt.get(r.visitId)!, row: r })
+    }
+  }
+
+  // —— 以下均为对"当前预约 self"的视角推导 ——
+  const A = opts.selfArrivalMin
+  const selfRow = selfId ? inHouse.find((r) => r.visitId === selfId) : undefined
+  const selfReady = selfId ? readyAt.get(selfId) : undefined
+  const waitMin = selfReady != null ? Math.max(0, Math.round(selfReady - A)) : 0
+
+  // 到馆瞬间仍被他人占用（已发未还）的椅子数 → 可立即发放数
+  const occupiedAtArrival = inHouse.filter(
+    (r) => r.visitId !== selfId && (readyAt.get(r.visitId) ?? Infinity) <= A && (releaseAt.get(r.visitId) ?? Infinity) > A
+  ).length
+  const selfFreeAtArrival = selfRow?.hasChair ? 0 : Math.max(0, TOTAL_WHEELCHAIRS - signals.wheelchairOffset - occupiedAtArrival)
+
+  // 排队位次：到馆时已在等候、且先于自己领到椅子的人数 + 1
+  let selfQueueIndex = 0
+  if (!selfRow?.hasChair && selfReady != null && selfReady > A && selfRow) {
+    const ahead = arrivals
+      .filter((r) => r.visitId !== selfId && r.arrival <= A && (readyAt.get(r.visitId) ?? Infinity) > A)
+      .filter((r) => {
+        const ro = readyAt.get(r.visitId)!
+        return ro < selfReady || (ro === selfReady && orderKey(r) > orderKey(selfRow))
+      }).length
+    selfQueueIndex = ahead + 1
+  }
+
+  // 排队时前方设备的归还预计（到馆后、自己可领前/同时回池的椅子）
+  const returnEtas: WheelchairReturnEta[] = selfQueueIndex > 0 && selfReady != null
+    ? inHouse
+      .filter((r) => r.visitId !== selfId)
+      .map((r) => ({ at: releaseAt.get(r.visitId) ?? r.end + CHAIR_TURN_MIN, row: r }))
+      .filter((x) => x.at > A && x.at <= selfReady + 1)
+      .sort((a, b) => a.at - b.at || orderKey(b.row) - orderKey(a.row))
+      .slice(0, selfQueueIndex)
+      .map((x) => ({
+        assetCode: x.row.assetCode ?? '预约周转',
+        returnMin: Math.round(x.at),
+        holder: x.row.label,
+        waitMin: Math.max(0, Math.round(x.at - A))
+      }))
+    : []
+
+  // 到馆时段（±30 分钟）同时需要轮椅的组数（含自己；含跨馆调入满足者，以体现并发需求）
+  const demandAtArrival = opts.selfWants
+    ? 1 + rows.filter((r) => r.visitId !== selfId && Math.abs(r.arrival - A) <= 30).length
+    : rows.filter((r) => Math.abs(r.arrival - A) <= 30).length
+
+  // 其他馆区可调资源（可用余量按日期确定性波动，至少保留 1 台可援）
+  const branches: BranchStock[] = BRANCH_WHEELCHAIRS.map((b) => {
+    const committed = hashStr(b.branch + date) % Math.max(1, b.total - 1)
+    return {
+      branch: b.branch,
+      available: b.total - committed,
+      distanceKm: b.distanceKm,
+      transferMin: b.transferMin,
+      carrier: b.carrier,
+      carrierPhone: b.carrierPhone
+    }
+  })
+  const anyBranch = branches.some((b) => b.available > 0)
+
+  return {
+    total: TOTAL_WHEELCHAIRS,
+    availableAtArrival: Math.round(selfFreeAtArrival),
+    demandAtArrival,
+    queueIndex: selfQueueIndex,
+    returnEtas,
+    nearestReadyMin: selfReady != null ? Math.round(selfReady) : undefined,
+    waitMin,
+    branches,
+    branchNeeded: (!selfRow?.hasChair && waitMin > 15 && anyBranch) ? 1 : 0
+  }
+}
+
+
 
 export function parkingAvailable(visits: Visit[], date: string, selfId?: string): number {
   const used = visits.filter(
@@ -336,6 +544,7 @@ export interface PlanInput {
   staff: Staff[]
   selfId?: string
   version?: number
+  lateByVisit?: Record<string, number> // 当日各预约的迟到分钟（用于库存排队时间轴）
 }
 
 export function planRoute(input: PlanInput): RoutePlan {
@@ -368,14 +577,48 @@ export function planRoute(input: PlanInput): RoutePlan {
   if (signals.lateMin > 0) notices.push(`观众迟到约 ${signals.lateMin} 分钟，已将入馆与各段接应时间顺延，自 ${fmtMin(arrivalMin)} 起算`)
   if (signals.visitorUnwell) notices.push('⚠ 观众反馈身体不适：已缩减为最近的 1–2 个展厅、加长休息，服务台备轮椅与医药箱')
 
-  // —— 轮椅库存 ——
-  const availW = wheelchairAvailable(signals, visits, input.date, selfId)
+  // —— 轮椅库存（含多预约同时需求的排队/归还/跨馆协调）——
+  const wInfo = party.borrowWheelchair
+    ? wheelchairCoordInfo({
+        date: input.date, visits, signals, selfId,
+        selfWants: true,
+        selfArrivalMin: arrivalMin,
+        selfContact: party.contactName,
+        lateOf: { ...(input.lateByVisit ?? {}), ...(selfId ? { [selfId]: signals.lateMin } : {}) }
+      })
+    : undefined
+  const availW = wInfo?.availableAtArrival ?? wheelchairAvailable(signals, visits, input.date, selfId)
   let wheelchairIssue: string | undefined
-  if (party.borrowWheelchair && availW <= 0) {
-    wheelchairIssue = '馆方轮椅库存暂不足：已登记排队并优先调剂，路线按"多休息点、最短步行"生成；服务台可提供折叠凳'
-    notices.push('⚠ ' + wheelchairIssue)
-  } else if (party.borrowWheelchair) {
-    notices.push(`轮椅库存充足（余 ${availW} 台），入馆后在服务台凭证领取`)
+  const selfVisit = selfId ? visits.find((v) => v.id === selfId) : undefined
+  const coordRes = selfVisit?.wheelchairCoord?.resolution
+  if (party.borrowWheelchair && coordRes === 'bring_own') {
+    notices.push('已与观众确认改用自带轮椅/助行设备，馆方轮椅预留已释放；路线仍按全程无台阶通道生成')
+  } else if (party.borrowWheelchair && wInfo) {
+    const hasOpenLoan = !!selfVisit?.loans.some((l) => l.loanedAt && !l.returnedAt)
+    const tr = selfVisit?.branchTransfer
+    if (hasOpenLoan) {
+      notices.push('轮椅已借出并在使用中，参观结束请归还服务台')
+    } else if (tr && tr.status !== 'cancelled') {
+      const stateText = tr.status === 'arrived'
+        ? `跨馆调入轮椅 ${tr.assetCode} 已送达服务台，请观众凭预约领取`
+        : `跨馆调运进行中：${tr.fromBranch}轮椅 ${tr.assetCode}，搬运人员 ${tr.carrier} 预计 ${fmtMin(tr.etaMin)} 送达（等待位置：${tr.waitLocation ?? '服务台等候区'}）`
+      notices.push(stateText)
+      if (tr.status !== 'arrived') {
+        wheelchairIssue = `本馆轮椅排队等待较长，已调用${tr.fromBranch}设备：${stateText}`
+      }
+    } else if (wInfo.waitMin === 0) {
+      notices.push(`轮椅库存可满足（到馆可发 ${wInfo.availableAtArrival} 台，同段约 ${wInfo.demandAtArrival} 组借用），入馆后在服务台凭证领取`)
+    } else {
+      const retText = wInfo.returnEtas.length
+        ? `前方 ${wInfo.returnEtas.length} 台预计 ${wInfo.returnEtas.map((r) => fmtMin(r.returnMin)).join('/')} 归还`
+        : '正在周转消毒'
+      wheelchairIssue =
+        `馆方轮椅到馆时段紧张：排队第 ${wInfo.queueIndex} 位，预计等待约 ${wInfo.waitMin} 分钟（${fmtMin(wInfo.nearestReadyMin!)} 可领，${retText}）；` +
+        (wInfo.branchNeeded
+          ? `可调用其他馆区设备（${wInfo.branches.filter((b) => b.available > 0).map((b) => `${b.branch.replace(/（.*?）/, '')}余${b.available}台/${b.transferMin}分钟`).join('、')}）。工作人员将联系确认：自带设备 / 调整时段 / 优先借用，等待期间提供座椅、饮水与临时讲解`
+          : '工作人员将联系确认：自带设备 / 调整时段 / 优先借用，等待期间提供座椅、饮水与临时讲解')
+      notices.push('⚠ ' + wheelchairIssue)
+    }
   }
   if (!party.borrowWheelchair && !party.usesWheelchair && lowStamina) {
     notices.push('温馨提示：根据"不能长时间站立/有老人"的情况，服务台可免费借用轮椅或折叠凳')
@@ -419,14 +662,15 @@ export function planRoute(input: PlanInput): RoutePlan {
       segs.push(...leg.segs); trace.push(...leg.edgeIds); t = leg.t; walkUsed += leg.dist
     }
   }
-  const checkinStay = 10 + (party.borrowWheelchair && availW > 0 ? 5 : 0)
+  const chairReady = wInfo ? wInfo.waitMin === 0 : availW > 0
+  const checkinStay = 10 + (party.borrowWheelchair && chairReady ? 5 : 0)
   const inLeg = pathLeg(ctx, curNode, 'desk', t, [
     { node: 'desk', stay: checkinStay, title: '服务台核验预约、安检与设备发放' }
   ])
   if (inLeg) {
     const last = inLeg.segs[inLeg.segs.length - 1]
     if (last) {
-      last.assist = `服务台核验预约${party.borrowWheelchair && availW > 0 ? '、借出轮椅并调试刹车脚踏' : ''}${party.needParking ? '、登记车位' : ''}`
+      last.assist = `服务台核验预约${party.borrowWheelchair && chairReady ? '、借出轮椅并调试刹车脚踏' : party.borrowWheelchair ? '、登记轮椅排队/协调' : ''}${party.needParking ? '、登记车位' : ''}`
     }
     segs.push(...inLeg.segs); trace.push(...inLeg.edgeIds); t = inLeg.t; walkUsed += inLeg.dist
     curNode = 'desk'
@@ -577,6 +821,7 @@ export function planRoute(input: PlanInput): RoutePlan {
     parkingIssue,
     wheelchairNeeded: party.borrowWheelchair,
     wheelchairIssue,
+    wheelchairInfo: wInfo,
     signals: signalSnapshot(signals),
     reduced: signals.visitorUnwell
   }
