@@ -73,6 +73,8 @@ export type EventType =
   | 'incident'
   | 'complete'
   | 'note'
+  | 'transfer'
+  | 'care'
 
 export interface ServiceEvent {
   id: string
@@ -150,6 +152,51 @@ export interface Loan {
   returnedAt?: string
 }
 
+// —— 轮椅库存不足协调 ——
+
+/** 其他馆区（分馆）可调配的轮椅资源 */
+export interface BranchInfo {
+  id: string
+  name: string
+  wheelchairs: number // 可调配轮椅数
+  transferMin: number // 单程搬运约需分钟
+}
+
+/** 跨馆调拨单：从其他馆区搬运轮椅到本馆 */
+export interface TransferRequest {
+  id: string
+  branchId: string
+  branchName: string
+  count: number
+  carrier: string // 搬运人员
+  status: 'requested' | 'in_transit' | 'arrived' | 'cancelled'
+  requestedAt: string // ISO
+  etaMin: number // 预计到达（当日分钟数）
+  arrivedAt?: string // ISO
+  forVisitId?: string // 主要为哪位观众协调
+  waitSpot?: string // 观众当前等待位置
+  note?: string
+}
+
+/** 库存不足时工作人员的协调处置（须记录原因） */
+export interface ShortageResolution {
+  id: string
+  ts: string // ISO
+  kind: 'bring_own' | 'reschedule' | 'priority' | 'transfer'
+  reason: string
+  actor: string
+  newArrivalMin?: number // reschedule：调整后的到馆分钟数
+  transferId?: string // transfer：关联调拨单
+}
+
+/** 等待期间服务台提供的关怀服务（进入预约记录） */
+export interface ComfortService {
+  id: string
+  ts: string // ISO
+  kind: 'seat' | 'water' | 'mini_tour'
+  text: string
+}
+
 export interface Visit {
   id: string
   code: string
@@ -163,6 +210,11 @@ export interface Visit {
   events: ServiceEvent[]
   feedback?: string
   createdAt: string
+  // 轮椅库存不足协调
+  resolutions: ShortageResolution[] // 协调处置记录（含原因）
+  comfortServices: ComfortService[] // 等待期间服务台提供的座椅/饮水/临时讲解
+  waitingSpot?: string // 观众当前等待位置
+  priorityBorrow?: boolean // 已安排优先借用
 }
 
 export interface Staff {

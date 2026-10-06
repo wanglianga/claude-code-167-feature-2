@@ -5,6 +5,7 @@ import { STAFF, HALLS, ELEVATORS, TOTAL_WHEELCHAIRS, TOTAL_PARKING } from '../da
 import { crowdLabel, parkingAvailable, wheelchairAvailable } from '../lib/planner'
 import type { LiveSignals } from '../lib/planner'
 import MuseumMap from '../components/MuseumMap'
+import WheelchairBoard from '../components/WheelchairBoard'
 import { Badge, Notice, StatusBadge } from '../components/ui'
 import { fmtMin, prettyDate, todayISO, weekdayCN } from '../utils'
 
@@ -139,10 +140,13 @@ export default function OpsPage() {
               <button className="btn ghost sm" disabled={s.global.wheelchairOffset <= 0}
                 onClick={() => s.setGlobalSignals({ wheelchairOffset: Math.max(0, s.global.wheelchairOffset - 1) }, '轮椅修复归库，可用库存恢复')}>＋ 修复归库</button>
             </div>
-            <p className="small muted mt8">当前额外不可用 {s.global.wheelchairOffset} 台；库存不足时系统自动把借用预约转为"排队调剂 + 最短步行路线"。</p>
+            <p className="small muted mt8">当前额外不可用 {s.global.wheelchairOffset} 台；库存不足时系统自动把借用预约转为"排队调剂 + 最短步行路线"，并在下方「轮椅库存协调」看板统一处置（联系自带 / 调整时段 / 优先借用 / 跨馆调拨）。</p>
           </div>
         </div>
       </div>
+
+      {/* —— 轮椅库存不足协调 —— */}
+      <WheelchairBoard signals={signalsOf(s.global)} today={today} onOpenVisit={setSelId} />
 
       {/* —— 接应任务看板 —— */}
       <div className="card">

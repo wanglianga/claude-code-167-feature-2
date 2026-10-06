@@ -11,6 +11,7 @@ export interface LiveSignals {
   crowdOverride: Record<string, number> // 人工设定的拥挤度 0..1
   staffExtraLeave: string[] // 临时请假 staff id
   wheelchairOffset: number // 额外不可用（报修/消毒）为正；提前归还为负
+  transferBoost: number // 其他馆区调拨已到达入库的轮椅数
   visitorUnwell: boolean // 观众身体不适 → 缩减路线、加强休息
   lateMin: number // 观众迟到分钟
 }
@@ -21,6 +22,7 @@ export const DEFAULT_SIGNALS: LiveSignals = {
   crowdOverride: {},
   staffExtraLeave: [],
   wheelchairOffset: 0,
+  transferBoost: 0,
   visitorUnwell: false,
   lateMin: 0
 }
@@ -32,6 +34,7 @@ export function signalSnapshot(s: LiveSignals): string {
     cr: Object.fromEntries(Object.entries(s.crowdOverride).sort()),
     l: [...s.staffExtraLeave].sort(),
     w: s.wheelchairOffset,
+    tb: s.transferBoost,
     u: s.visitorUnwell
   })
 }
@@ -260,7 +263,97 @@ export function wheelchairAvailable(signals: LiveSignals, visits: Visit[], date:
   const loaned = visits
     .filter((v) => v.id !== selfId && v.date === date && v.status !== 'cancelled')
     .reduce((n, v) => n + v.loans.filter((l) => l.loanedAt && !l.returnedAt).length, 0)
-  return Math.max(0, TOTAL_WHEELCHAIRS - signals.wheelchairOffset - Math.max(reserved, loaned))
+  const effectiveTotal = TOTAL_WHEELCHAIRS - signals.wheelchairOffset + signals.transferBoost
+  return Math.max(0, effectiveTotal - Math.max(reserved, loaned))
+}
+
+// —— 轮椅库存协调看板：多预约同时需要轮椅时的统一核算 ——
+export interface WheelchairLoanInfo {
+  visitId: string
+  code: string
+  name: string
+  assetCode: string
+  expectedReturnMin?: number // 预计归还时间（按该预约路线结束时间估算）
+}
+
+export interface WheelchairDemandItem {
+  visitId: string
+  code: string
+  name: string
+  status: Visit['status']
+  arrivalMin: number // 观众到馆时间（含迟到顺延）
+  loaned: boolean // 已借到
+  served: boolean // 已借到或已改为自带/取消借用
+  shortage: boolean // 当前核算下存在缺口
+  priority: boolean // 已安排优先借用
+}
+
+export interface WheelchairBoard {
+  total: number // 本馆总台数
+  offset: number // 报修/消毒不可用
+  transferBoost: number // 跨馆调拨已到达
+  loanedNow: number // 当前在借
+  reserved: number // 今日预约借用总数
+  availableNow: number // 当前可借
+  loans: WheelchairLoanInfo[] // 在借清单（含预计归还时间）
+  demand: WheelchairDemandItem[] // 今日需轮椅的预约（含观众到馆时间）
+  shortageCount: number // 缺口人数
+}
+
+export function wheelchairBoard(signals: LiveSignals, visits: Visit[], date: string): WheelchairBoard {
+  const effectiveTotal = Math.max(0, TOTAL_WHEELCHAIRS - signals.wheelchairOffset + signals.transferBoost)
+  const dayVisits = visits.filter((v) => v.date === date && v.status !== 'cancelled')
+
+  const loans: WheelchairLoanInfo[] = []
+  for (const v of dayVisits) {
+    for (const l of v.loans) {
+      if (l.loanedAt && !l.returnedAt) {
+        loans.push({
+          visitId: v.id, code: v.code, name: v.party.contactName,
+          assetCode: l.assetCode,
+          expectedReturnMin: v.route ? v.route.endMin : undefined
+        })
+      }
+    }
+  }
+  loans.sort((a, b) => (a.expectedReturnMin ?? 9999) - (b.expectedReturnMin ?? 9999))
+
+  const borrowVisits = dayVisits
+    .filter((v) => v.party.borrowWheelchair)
+    .sort((a, b) => a.baseArrivalMin - b.baseArrivalMin)
+  const reserved = borrowVisits.length
+  const loanedNow = loans.length
+  const availableNow = Math.max(0, effectiveTotal - Math.max(reserved, loanedNow))
+
+  // 按到馆顺序模拟发放：已借到/已改为自带的视为已满足；其余按有效库存依次满足，排不到的即缺口
+  let pool = effectiveTotal - loanedNow
+  const demand: WheelchairDemandItem[] = borrowVisits.map((v) => {
+    const hasLoan = v.loans.some((l) => l.loanedAt && !l.returnedAt)
+    const served = hasLoan || v.status === 'completed'
+    let shortage = false
+    if (!served) {
+      if (pool > 0) pool -= 1
+      else shortage = true
+    }
+    return {
+      visitId: v.id, code: v.code, name: v.party.contactName, status: v.status,
+      arrivalMin: v.route ? v.route.arrivalMin : v.baseArrivalMin,
+      loaned: hasLoan, served, shortage,
+      priority: v.priorityBorrow ?? false
+    }
+  })
+
+  return {
+    total: TOTAL_WHEELCHAIRS,
+    offset: signals.wheelchairOffset,
+    transferBoost: signals.transferBoost,
+    loanedNow,
+    reserved,
+    availableNow,
+    loans,
+    demand,
+    shortageCount: demand.filter((d) => d.shortage).length
+  }
 }
 
 export function parkingAvailable(visits: Visit[], date: string, selfId?: string): number {
@@ -372,7 +465,7 @@ export function planRoute(input: PlanInput): RoutePlan {
   const availW = wheelchairAvailable(signals, visits, input.date, selfId)
   let wheelchairIssue: string | undefined
   if (party.borrowWheelchair && availW <= 0) {
-    wheelchairIssue = '馆方轮椅库存暂不足：已登记排队并优先调剂，路线按"多休息点、最短步行"生成；服务台可提供折叠凳'
+    wheelchairIssue = '馆方轮椅库存暂不足：已登记排队并优先调剂，路线按"多休息点、最短步行"生成；服务台可协调观众自带设备、调整参观时段、安排优先借用或从其他馆区调拨，等待期间提供座椅/饮水/临时讲解'
     notices.push('⚠ ' + wheelchairIssue)
   } else if (party.borrowWheelchair) {
     notices.push(`轮椅库存充足（余 ${availW} 台），入馆后在服务台凭证领取`)

@@ -34,6 +34,7 @@ export default function BookPage() {
     crowdOverride: global.crowdOverride,
     staffExtraLeave: global.staffExtraLeave,
     wheelchairOffset: global.wheelchairOffset,
+    transferBoost: global.transferBoost,
     visitorUnwell: false,
     lateMin: 0
   }

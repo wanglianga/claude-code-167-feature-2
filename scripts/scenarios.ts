@@ -1,5 +1,5 @@
-import { STAFF } from '../src/data/museum'
-import { planRoute, DEFAULT_SIGNALS, type LiveSignals } from '../src/lib/planner'
+import { STAFF, TOTAL_WHEELCHAIRS } from '../src/data/museum'
+import { planRoute, DEFAULT_SIGNALS, wheelchairAvailable, wheelchairBoard, type LiveSignals } from '../src/lib/planner'
 import type { PartyProfile, Visit } from '../src/types'
 import { uid, shortCode } from '../src/utils'
 
@@ -22,7 +22,7 @@ function party(over: Partial<PartyProfile> = {}): PartyProfile {
 function makeVisit(date: string, arrivalMin: number, p: PartyProfile, status: Visit['status'] = 'booked'): Visit {
   return {
     id: uid('v'), code: shortCode(), date, baseArrivalMin: arrivalMin, status, party: p,
-    loans: [], events: [], createdAt: new Date().toISOString()
+    loans: [], events: [], resolutions: [], comfortServices: [], createdAt: new Date().toISOString()
   }
 }
 
@@ -154,6 +154,41 @@ console.log('\n场景 13：陪同人临时增加不影响生成；各段时刻�
   const mins = plan.segments.map((s) => s.arriveMin)
   assert(mins.every((m, i) => i === 0 || m >= mins[i - 1]), '路段到达时间单调不减')
   assert(plan.totalMin > 0, '全程时长为正')
+}
+
+console.log('\n场景 14：跨馆调拨到达 → 可用库存恢复，缺口提示解除')
+{
+  const others: Visit[] = Array.from({ length: 12 }, () => makeVisit(DATE, 10 * 60, party({ borrowWheelchair: true })))
+  const p = party({ borrowWheelchair: true })
+  const before = planRoute({ party: p, date: DATE, arrivalMin: 14 * 60, signals: DEFAULT_SIGNALS, visits: others, staff: STAFF })
+  assert(!!before.wheelchairIssue, '调拨前库存不足给出协调提示')
+  assert(before.wheelchairIssue!.includes('其他馆区调拨'), '提示中含跨馆调拨与等待关怀方案')
+  const sig: LiveSignals = { ...DEFAULT_SIGNALS, transferBoost: 2 }
+  assert(wheelchairAvailable(sig, others, DATE) === 2, `调拨 2 台到达后可用 ${wheelchairAvailable(sig, others, DATE)} 台（期望 2）`)
+  const after = planRoute({ party: p, date: DATE, arrivalMin: 14 * 60, signals: sig, visits: others, staff: STAFF })
+  assert(!after.wheelchairIssue, '调拨到达后缺口提示解除')
+  assert(after.notices.some((n) => n.includes('余 2 台')), '库存余量提示计入调拨设备')
+}
+
+console.log('\n场景 15：库存协调看板（归还预计时间 / 观众到馆时间 / 缺口核算）')
+{
+  const v1 = makeVisit(DATE, 9 * 60 + 30, party({ borrowWheelchair: true }), 'visiting')
+  v1.route = planRoute({ party: v1.party, date: DATE, arrivalMin: 9 * 60 + 30, signals: DEFAULT_SIGNALS, visits: [], staff: STAFF })
+  v1.loans = [{ id: uid('loan'), assetCode: 'WC-0001', loanedAt: new Date().toISOString() }]
+  const v2 = makeVisit(DATE, 11 * 60, party({ borrowWheelchair: true }))
+  const board = wheelchairBoard(DEFAULT_SIGNALS, [v1, v2], DATE)
+  assert(board.loanedNow === 1 && board.loans[0].assetCode === 'WC-0001', '看板列出在借轮椅资产编号')
+  assert(board.loans[0].expectedReturnMin === v1.route.endMin, `归还预计时间 ${board.loans[0].expectedReturnMin}（= 该预约路线结束时间）`)
+  assert(board.demand.length === 2 && board.demand[1].arrivalMin === 11 * 60, '看板列出观众到馆时间')
+  assert(board.shortageCount === 0 && board.availableNow === TOTAL_WHEELCHAIRS - 2, '库存充足时无缺口')
+  // 14 组借用（1 组已在借）→ 有效池 11 → 缺口 2
+  const many: Visit[] = Array.from({ length: 14 }, (_, i) => makeVisit(DATE, 9 * 60 + i * 10, party({ borrowWheelchair: true })))
+  many[0].loans = [{ id: uid('loan'), assetCode: 'WC-0002', loanedAt: new Date().toISOString() }]
+  const board2 = wheelchairBoard(DEFAULT_SIGNALS, many, DATE)
+  assert(board2.shortageCount === 2, `14 组借用 12 台（1 台在借）→ 缺口 ${board2.shortageCount} 组（期望 2）`)
+  assert(board2.demand.filter((d) => d.shortage).every((d) => !d.loaned), '缺口组均为未借到的预约')
+  const board3 = wheelchairBoard({ ...DEFAULT_SIGNALS, transferBoost: 2 }, many, DATE)
+  assert(board3.shortageCount === 0, '调拨 2 台到达后缺口归零')
 }
 
 console.log(`\n结果：${pass} 通过，${fail} 失败`)

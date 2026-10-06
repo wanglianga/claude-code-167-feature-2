@@ -17,7 +17,7 @@ export default function HomePage() {
 
   const today = new Date()
   const todayISO = `${today.getFullYear()}-${String(today.getMonth() + 1).padStart(2, '0')}-${String(today.getDate()).padStart(2, '0')}`
-  const wAvail = wheelchairAvailable({ elevatorsDown: global.elevatorsDown, closedHalls: global.closedHalls, crowdOverride: global.crowdOverride, staffExtraLeave: global.staffExtraLeave, wheelchairOffset: global.wheelchairOffset, visitorUnwell: false, lateMin: 0 }, visits, todayISO)
+  const wAvail = wheelchairAvailable({ elevatorsDown: global.elevatorsDown, closedHalls: global.closedHalls, crowdOverride: global.crowdOverride, staffExtraLeave: global.staffExtraLeave, wheelchairOffset: global.wheelchairOffset, transferBoost: global.transferBoost, visitorUnwell: false, lateMin: 0 }, visits, todayISO)
   const pAvail = parkingAvailable(visits, todayISO)
 
   return (

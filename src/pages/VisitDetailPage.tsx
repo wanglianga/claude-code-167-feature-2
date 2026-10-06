@@ -19,7 +19,9 @@ const EVENT_META: Record<EventType, { label: string; tone?: 'brand' | 'gold' | '
   assist: { label: '现场协助', tone: 'gold' },
   incident: { label: '突发情况', tone: 'red' },
   complete: { label: '参观结束', tone: 'brand' },
-  note: { label: '服务记录', tone: 'amber' }
+  note: { label: '服务记录', tone: 'amber' },
+  transfer: { label: '跨馆调拨', tone: 'blue' },
+  care: { label: '等待关怀', tone: 'green' }
 }
 
 function ServiceLog({ visitId }: { visitId: string }) {
@@ -49,6 +51,7 @@ export default function VisitDetailPage() {
   const navigate = useNavigate()
   const visit = useStore((s) => s.visits.find((v) => v.id === id))
   const global = useStore((s) => s.global)
+  const transfers = useStore((s) => s.transfers)
   const vs = useStore((s) => (id ? s.visitSignals[id] : undefined))
   const setVisitSignals = useStore((s) => s.setVisitSignals)
   const cancelVisit = useStore((s) => s.cancelVisit)
@@ -66,10 +69,13 @@ export default function VisitDetailPage() {
   const escort = STAFF.find((s) => s.id === (visit.escortId ?? visit.route?.escortId))
   const openLoan = visit.loans.find((l) => l.loanedAt && !l.returnedAt)
   const crowdMap = Object.fromEntries(visit.route?.stops.map((st) => [st.hallId, st.crowd]) ?? [])
+  const myTransfers = transfers.filter((t) => t.forVisitId === visit.id && t.status !== 'cancelled')
+  const activeTransfer = myTransfers.find((t) => t.status === 'requested' || t.status === 'in_transit')
   const planChanged = visit.route ? visit.route.signals !== JSON.stringify({
     e: [...global.elevatorsDown].sort(), c: [...global.closedHalls].sort(),
     cr: Object.fromEntries(Object.entries(global.crowdOverride).sort()),
     l: [...global.staffExtraLeave].sort(), w: global.wheelchairOffset,
+    tb: global.transferBoost,
     u: vs?.visitorUnwell ?? false
   }) : false
 
@@ -110,6 +116,49 @@ export default function VisitDetailPage() {
           <Notice kind="info">现场情况（电梯、闭馆、拥挤、排班）较预约时发生变化，当前展示的路线已由调度台按最新情况重新核算。</Notice>
         )}
       </div>
+
+      {/* —— 轮椅库存不足协调进度 —— */}
+      {(activeTransfer || myTransfers.length > 0 || (visit.resolutions ?? []).length > 0 || (visit.comfortServices ?? []).length > 0 || visit.priorityBorrow) && (
+        <div className="card">
+          <h2>♿ 轮椅协调进度 <Badge tone="brand">服务台实时跟进</Badge></h2>
+          <p className="sub">因馆内轮椅库存紧张，服务台已为本次参观启动协调；进展与等待期间提供的服务都会记录在同一条服务记录中。</p>
+
+          {visit.priorityBorrow && <Notice kind="info">⭐ 已为您安排优先借用：下一台归还或调拨到达的轮椅将优先发给您。</Notice>}
+
+          {myTransfers.map((t) => (
+            <div key={t.id} className="eta-card">
+              <div className="flex between">
+                <span className="t">🚚 从{t.branchName}调拨 {t.count} 台轮椅</span>
+                <Badge tone={t.status === 'arrived' ? 'green' : t.status === 'in_transit' ? 'blue' : 'amber'}>
+                  {t.status === 'arrived' ? '已到馆，请至服务台领取' : t.status === 'in_transit' ? '搬运在途' : '已申请，待出发'}
+                </Badge>
+              </div>
+              <div className="small muted mt8">
+                搬运人员：{t.carrier} · 预计 {fmtMin(t.etaMin)} 到馆
+                {t.status !== 'arrived' && <> · 请您在「{t.waitSpot ?? visit.waitingSpot ?? '一层咨询服务台旁等候区'}」稍候</>}
+              </div>
+            </div>
+          ))}
+
+          {(visit.comfortServices ?? []).length > 0 && (
+            <div className="mt8">
+              <b className="small">等待期间服务台已提供：</b>
+              <div className="badges mt8">
+                {(visit.comfortServices ?? []).map((c) => <Badge key={c.id} tone="green">✓ {c.text}</Badge>)}
+              </div>
+            </div>
+          )}
+
+          {(visit.resolutions ?? []).length > 0 && (
+            <div className="small muted mt8">
+              协调处置记录：
+              {(visit.resolutions ?? []).map((r) => (
+                <div key={r.id}>· {{ bring_own: '联系自带设备', reschedule: '调整参观时段', priority: '优先借用', transfer: '跨馆调拨' }[r.kind]}{r.newArrivalMin ? `（改至 ${fmtMin(r.newArrivalMin)}）` : ''}：{r.reason}</div>
+              ))}
+            </div>
+          )}
+        </div>
+      )}
 
       {visit.status === 'booked' && (
         <div className="card">

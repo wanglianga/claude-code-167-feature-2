@@ -1,10 +1,10 @@
 import { create } from 'zustand'
 import { persist } from 'zustand/middleware'
-import { STAFF } from './data/museum'
+import { BRANCHES, STAFF } from './data/museum'
 import { planRoute } from './lib/planner'
 import type { LiveSignals } from './lib/planner'
-import type { EventType, PartyProfile, Visit } from './types'
-import { shortCode, todayISO, uid } from './utils'
+import type { ComfortService, EventType, PartyProfile, ShortageResolution, TransferRequest, Visit } from './types'
+import { fmtMin, shortCode, todayISO, uid } from './utils'
 
 export interface GlobalSignals {
   elevatorsDown: string[]
@@ -12,6 +12,7 @@ export interface GlobalSignals {
   crowdOverride: Record<string, number>
   staffExtraLeave: string[]
   wheelchairOffset: number
+  transferBoost: number // 其他馆区调拨已到达入库的轮椅数
 }
 
 const DEFAULT_GLOBAL: GlobalSignals = {
@@ -19,7 +20,8 @@ const DEFAULT_GLOBAL: GlobalSignals = {
   closedHalls: [],
   crowdOverride: {},
   staffExtraLeave: [],
-  wheelchairOffset: 0
+  wheelchairOffset: 0,
+  transferBoost: 0
 }
 
 export interface VisitSignals {
@@ -31,6 +33,7 @@ interface StoreState {
   visits: Visit[]
   global: GlobalSignals
   visitSignals: Record<string, VisitSignals>
+  transfers: TransferRequest[] // 跨馆轮椅调拨单
   hydrated: boolean
 
   createVisit: (input: { date: string; arrivalMin: number; party: PartyProfile }) => string
@@ -47,6 +50,13 @@ interface StoreState {
   setVisitSignals: (id: string, patch: Partial<VisitSignals>, cause: string) => void
   setExtraCompanions: (id: string, n: number) => void
   addFeedback: (id: string, text: string) => void
+  // —— 轮椅库存不足协调 ——
+  requestTransfer: (input: { branchId: string; count: number; carrier: string; forVisitId?: string; waitSpot?: string; note?: string }) => string
+  advanceTransfer: (id: string) => void
+  cancelTransfer: (id: string, cause?: string) => void
+  resolveShortage: (id: string, input: { kind: 'bring_own' | 'reschedule' | 'priority'; reason: string; newArrivalMin?: number }) => void
+  setWaitingSpot: (id: string, spot: string) => void
+  addComfortService: (id: string, kind: ComfortService['kind']) => void
   resetDemo: () => void
   seedDemo: () => void
 }
@@ -58,6 +68,7 @@ function mergeSignals(global: GlobalSignals, vs?: VisitSignals): LiveSignals {
     crowdOverride: global.crowdOverride,
     staffExtraLeave: global.staffExtraLeave,
     wheelchairOffset: global.wheelchairOffset,
+    transferBoost: global.transferBoost,
     lateMin: vs?.lateMin ?? 0,
     visitorUnwell: vs?.visitorUnwell ?? false
   }
@@ -96,10 +107,17 @@ function makeVisit(state: StoreState, date: string, arrivalMin: number, party: P
   const visit: Visit = {
     id, code: shortCode(), date, baseArrivalMin: arrivalMin, status: 'booked', party, route: plan,
     escortId: plan.escortId, loans: [],
+    resolutions: [], comfortServices: [],
     events: [{ id: uid('ev'), ts: new Date().toISOString(), type: 'book', actor: '观众', text: `提交预约：${party.size} 人，${date} 到馆` }],
     createdAt: new Date().toISOString()
   }
   return visit
+}
+
+const COMFORT_TEXT: Record<ComfortService['kind'], string> = {
+  seat: '已在等候区安排座椅休息',
+  water: '已提供饮用水与一次性水杯',
+  mini_tour: '已安排大厅临时讲解（等候期间微导览）'
 }
 
 function emptyParty(): PartyProfile {
@@ -122,6 +140,7 @@ export const useStore = create<StoreState>()(
       visits: [],
       global: DEFAULT_GLOBAL,
       visitSignals: {},
+      transfers: [],
       hydrated: false,
 
       createVisit: ({ date, arrivalMin, party }) => {
@@ -268,9 +287,142 @@ export const useStore = create<StoreState>()(
         }))
       },
 
+      // —— 轮椅库存不足协调 ——
+
+      requestTransfer: (input) => {
+        const branch = BRANCHES.find((b) => b.id === input.branchId)
+        if (!branch) return ''
+        const now = new Date()
+        const etaMin = now.getHours() * 60 + now.getMinutes() + branch.transferMin
+        const tr: TransferRequest = {
+          id: uid('tr'), branchId: branch.id, branchName: branch.name,
+          count: input.count, carrier: input.carrier, status: 'requested',
+          requestedAt: now.toISOString(), etaMin,
+          forVisitId: input.forVisitId, waitSpot: input.waitSpot, note: input.note
+        }
+        set((s) => ({
+          transfers: [...s.transfers, tr],
+          visits: s.visits.map((v) => {
+            if (v.id !== input.forVisitId) return v
+            const resolution: ShortageResolution = {
+              id: uid('res'), ts: now.toISOString(), kind: 'transfer',
+              reason: input.note?.trim() || '本馆库存不足，申请跨馆调拨', actor: '服务台', transferId: tr.id
+            }
+            let next: Visit = {
+              ...v,
+              waitingSpot: input.waitSpot ?? v.waitingSpot,
+              resolutions: [...(v.resolutions ?? []), resolution]
+            }
+            next = addEvent(
+              next, 'transfer',
+              `库存不足协调：已向${branch.name}申请调拨 ${input.count} 台轮椅，${input.carrier} 搬运，预计 ${fmtMin(etaMin)} 送达；观众在「${input.waitSpot ?? '一层咨询服务台旁等候区'}」等候（原因：${resolution.reason}）`,
+              '服务台'
+            )
+            return next
+          })
+        }))
+        return tr.id
+      },
+
+      advanceTransfer: (id) => {
+        const tr = get().transfers.find((t) => t.id === id)
+        if (!tr || tr.status === 'arrived' || tr.status === 'cancelled') return
+        if (tr.status === 'requested') {
+          set((s) => ({
+            transfers: s.transfers.map((t) => (t.id === id ? { ...t, status: 'in_transit' } : t)),
+            visits: s.visits.map((v) =>
+              v.id === tr.forVisitId
+                ? addEvent(v, 'transfer', `${tr.carrier} 已从${tr.branchName}出发，搬运 ${tr.count} 台轮椅在途，预计 ${fmtMin(tr.etaMin)} 到馆`, '调度台')
+                : v
+            )
+          }))
+          return
+        }
+        // in_transit → arrived：入库后可用库存增加，所有相关预约自动重算
+        set((s) => ({
+          transfers: s.transfers.map((t) => (t.id === id ? { ...t, status: 'arrived', arrivedAt: new Date().toISOString() } : t))
+        }))
+        get().setGlobalSignals(
+          { transferBoost: get().global.transferBoost + tr.count },
+          `${tr.branchName}调拨的 ${tr.count} 台轮椅已到馆入库（${tr.carrier}），可用库存恢复，排队预约重新核算`
+        )
+        if (tr.forVisitId) {
+          set((s) => ({
+            visits: s.visits.map((v) =>
+              v.id === tr.forVisitId
+                ? addEvent(v, 'transfer', `调拨的 ${tr.count} 台轮椅已到馆入库，请观众前往服务台领取，感谢耐心等待`, '服务台')
+                : v
+            )
+          }))
+        }
+      },
+
+      cancelTransfer: (id, cause) => {
+        const tr = get().transfers.find((t) => t.id === id)
+        if (!tr || tr.status === 'arrived' || tr.status === 'cancelled') return
+        set((s) => ({
+          transfers: s.transfers.map((t) => (t.id === id ? { ...t, status: 'cancelled' } : t)),
+          visits: s.visits.map((v) =>
+            v.id === tr.forVisitId
+              ? addEvent(v, 'transfer', `跨馆调拨单已取消：${cause ?? '分馆临时无法调配，改按其他方案协调'}`, '调度台')
+              : v
+          )
+        }))
+      },
+
+      resolveShortage: (id, input) => {
+        set((s) => {
+          const target = s.visits.find((v) => v.id === id)
+          if (!target) return {}
+          const resolution: ShortageResolution = {
+            id: uid('res'), ts: new Date().toISOString(),
+            kind: input.kind, reason: input.reason, actor: '服务台',
+            newArrivalMin: input.newArrivalMin
+          }
+          const visits = s.visits.map((v) => {
+            if (v.id !== id) return v
+            let next: Visit = { ...v, resolutions: [...(v.resolutions ?? []), resolution] }
+            if (input.kind === 'bring_own') {
+              next = { ...next, party: { ...next.party, borrowWheelchair: false, usesWheelchair: true } }
+              next = replanWithin({ ...s, visits: s.visits }, next, s.visitSignals[id], '已联系观众自带设备，取消馆方借用并重新核算路线')
+              next = addEvent(next, 'note', `库存不足协调：已电话联系观众，观众将自带轮椅/代步设备到馆（原因：${input.reason}）`, '服务台')
+            } else if (input.kind === 'reschedule') {
+              const m = input.newArrivalMin ?? v.baseArrivalMin
+              next = { ...next, baseArrivalMin: m }
+              next = replanWithin({ ...s, visits: s.visits }, next, s.visitSignals[id], `错峰调整：与观众协商到馆时间改为 ${fmtMin(m)}，避开轮椅使用高峰`)
+              next = addEvent(next, 'note', `库存不足协调：与观众协商调整参观时段至 ${fmtMin(m)}（原因：${input.reason}）`, '服务台')
+            } else {
+              next = { ...next, priorityBorrow: true }
+              next = addEvent(next, 'note', `库存不足协调：已安排优先借用，下一台归还或调拨到达的轮椅优先发给该观众（原因：${input.reason}）`, '服务台')
+            }
+            return next
+          })
+          return { visits }
+        })
+      },
+
+      setWaitingSpot: (id, spot) => {
+        set((s) => ({
+          visits: s.visits.map((v) =>
+            v.id === id ? addEvent({ ...v, waitingSpot: spot }, 'note', `观众等待位置更新：${spot}`, '服务台') : v
+          )
+        }))
+      },
+
+      addComfortService: (id, kind) => {
+        set((s) => ({
+          visits: s.visits.map((v) => {
+            if (v.id !== id) return v
+            const svc: ComfortService = { id: uid('cf'), ts: new Date().toISOString(), kind, text: COMFORT_TEXT[kind] }
+            const next: Visit = { ...v, comfortServices: [...(v.comfortServices ?? []), svc] }
+            return addEvent(next, 'care', `等待期间关怀服务：${svc.text}`, '服务台')
+          })
+        }))
+      },
+
       resetDemo: () => {
         localStorage.removeItem(SEED_FLAG)
-        set({ visits: [], global: DEFAULT_GLOBAL, visitSignals: {} })
+        set({ visits: [], global: DEFAULT_GLOBAL, visitSignals: {}, transfers: [] })
       },
 
       seedDemo: () => {
@@ -314,7 +466,27 @@ export const useStore = create<StoreState>()(
     }),
     {
       name: 'museum-access-visit-v1',
-      partialize: (s) => ({ visits: s.visits, global: s.global, visitSignals: s.visitSignals }),
+      version: 2,
+      migrate: (persisted) => {
+        // v1 → v2：补充轮椅协调相关字段（调拨单、处置记录、关怀服务、transferBoost）
+        const s = (persisted ?? {}) as {
+          visits?: Array<Partial<Visit>>
+          global?: Partial<GlobalSignals>
+          visitSignals?: Record<string, VisitSignals>
+          transfers?: TransferRequest[]
+        }
+        return {
+          visits: (s.visits ?? []).map((v) => ({
+            ...v,
+            resolutions: v.resolutions ?? [],
+            comfortServices: v.comfortServices ?? []
+          })),
+          global: { ...DEFAULT_GLOBAL, ...(s.global ?? {}) },
+          visitSignals: s.visitSignals ?? {},
+          transfers: s.transfers ?? []
+        }
+      },
+      partialize: (s) => ({ visits: s.visits, global: s.global, visitSignals: s.visitSignals, transfers: s.transfers }),
       onRehydrateStorage: () => (state) => {
         state?.seedDemo()
       }

@@ -65,5 +65,33 @@ const id = useStore.getState().createVisit({
 const full = renderAt(`/visit/${id}`)
 assert(full.includes('手语'), '全需求详情含手语')
 assert(full.includes('馆区无障碍平面图'), '详情含馆区平面图')
+
+// —— 轮椅库存不足协调 ——
+useStore.getState().setGlobalSignals({ wheelchairOffset: 12 }, '全部轮椅报修演练')
+const cid = useStore.getState().createVisit({
+  date: new Date().toISOString().slice(0, 10), arrivalMin: 13 * 60,
+  party: {
+    contactName: '协调测试', phone: '13400000000', size: 2,
+    usesWheelchair: false, borrowWheelchair: true, needSign: false, needSlow: false,
+    hasElder: true, hasChild: false, needParking: false, canStandLong: false, extraCompanions: 0
+  }
+})
+useStore.getState().requestTransfer({
+  branchId: 'b-east', count: 1, carrier: '刘师傅（后勤保障车）',
+  forVisitId: cid, waitSpot: '一层大厅休息区', note: '库存不足演练'
+})
+useStore.getState().addComfortService(cid, 'seat')
+const ops2 = renderAt('/ops')
+assert(ops2.includes('轮椅库存协调'), '工作台含轮椅库存协调看板')
+assert(ops2.includes('归还预计时间'), '看板展示在借轮椅归还预计时间')
+assert(ops2.includes('观众到馆时间'), '看板展示各预约观众到馆时间')
+assert(ops2.includes('其他馆区可调配设备'), '看板展示是否可调用其他馆区设备')
+assert(ops2.includes('联系观众自带设备') && ops2.includes('调整参观时段') && ops2.includes('安排优先借用'), '缺口处置含自带/调时段/优先借用')
+assert(ops2.includes('搬运人员') && ops2.includes('等待位置'), '调拨单显示搬运人员与观众等待位置')
+assert(ops2.includes('提供座椅') && ops2.includes('提供饮水') && ops2.includes('临时讲解'), '等待期间可提供座椅/饮水/临时讲解')
+const cdetail = renderAt(`/visit/${cid}`)
+assert(cdetail.includes('轮椅协调进度'), '观众端展示轮椅协调进度')
+assert(cdetail.includes('搬运人员') && cdetail.includes('预计'), '观众端展示搬运人员与预计到达')
+assert(cdetail.includes('座椅休息'), '观众端展示已提供的等待关怀服务')
 console.log(`\n结果：${pass} 通过，${fail} 失败`)
 if (fail) process.exit(1)

@@ -1,4 +1,4 @@
-import type { Edge, ElevatorInfo, GraphNode, HallInfo, Staff } from '../types'
+import type { BranchInfo, Edge, ElevatorInfo, GraphNode, HallInfo, Staff } from '../types'
 
 // —— 馆区节点图 ——
 // 楼层：B1(-1) 特展厅 / F1(1) 大厅·咨询服务台 / F2(2) 古代馆 / F3(3) 近代馆·自然馆
@@ -97,6 +97,28 @@ export const HALLS: HallInfo[] = [
 export const TOTAL_WHEELCHAIRS = 12
 // 无障碍车位
 export const TOTAL_PARKING = 8
+
+// —— 轮椅库存不足协调：其他馆区可调配资源 ——
+export const BRANCHES: BranchInfo[] = [
+  { id: 'b-east', name: '东馆 · 现代艺术馆', wheelchairs: 6, transferMin: 25 },
+  { id: 'b-river', name: '滨江分馆 · 城市记忆馆', wheelchairs: 4, transferMin: 35 },
+  { id: 'b-west', name: '西馆 · 自然博物馆', wheelchairs: 3, transferMin: 45 }
+]
+
+// 可承担跨馆搬运的后勤人员 / 车辆
+export const CARRIERS: string[] = [
+  '刘师傅（后勤保障车）',
+  '孙师傅（后勤保障车）',
+  '志愿者车队 · 小高'
+]
+
+// 观众等待期间可安排的等候位置
+export const WAITING_SPOTS: string[] = [
+  '一层咨询服务台旁等候区',
+  '一层大厅休息区',
+  'B1 休息平台',
+  '正门无障碍坡道休息亭'
+]
 
 // 讲解员 / 志愿者排班
 export const STAFF: Staff[] = [
